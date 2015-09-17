@@ -7,30 +7,29 @@ use mio::{Sender, Timeout, TimerError};
 
 use {Scope, BaseMachine};
 
-
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Abort {
-    NoSlabSpace,
     RegisterFailed,
-    MachineAddError,
+    MachineAddError
 }
 
-pub enum Notify<T> {
-    NewMachine(T),
+pub enum Notify {
+    RegisterMachine(Token)
 }
 
-struct RootScope<'a, H: mio::Handler>
-    where H::Timeout: 'a, H::Message: 'a, H:'a
+struct RootScope<'a, H: mio::Handler, M: Send>
+    where H::Timeout: 'a, H::Message: 'a, H:'a, M: 'a
 {
     channel: &'a Sender<H::Message>,
     eloop: &'a mut EventLoop<H>,
+    slab: &'a mut Slab<M>,
     token: Token,
 }
 
 pub struct Handler<Ctx, M: Send> {
     slab: Slab<M>,
     context: Ctx,
-    channel: Sender<Notify<M>>,
+    channel: Sender<Notify>,
 }
 
 pub trait EventMachine<C>: BaseMachine + Send + Sized {
@@ -43,6 +42,12 @@ pub trait EventMachine<C>: BaseMachine + Send + Sized {
     fn register<S>(&mut self, scope: &mut S)
         -> Result<(), Error>
         where S: Scope<Self>;
+
+    fn shutdown<S>(&mut self, _context: &mut C, _scope: &mut S)
+        where S: Scope<Self>
+    {
+        // Ignore shutdown requests by default
+    }
 
     /// Abnormal termination of event machine
     fn abort<S>(self, reason: Abort, _context: &mut C, _scope: &mut S)
@@ -69,27 +74,20 @@ impl<C, M:Send> Handler<C, M>
     }
 }
 
-impl<'a, C, M> Scope<M> for RootScope<'a, Handler<C, M>>
+impl<'a, C, M> Scope<M> for RootScope<'a, Handler<C, M>, M>
     where M: 'a, M: EventMachine<C>,
           M::Timeout: 'a,
 {
-    fn async_add_machine(&mut self, m: M) -> Result<(), M> {
-        use mio::NotifyError::*;
-        match self.channel.send(Notify::NewMachine(m)) {
-            Ok(()) => Ok(()),
-            Err(Io(e)) => {
-                // We would probably do something better here, but mio doesn't
-                // give us a message. But anyway it's probably never happen
-                panic!("Io error when sending notify: {}", e);
+    fn async_add_machine(&mut self, m: M) -> Result<Token, M> {
+        use self::Notify::*;
+        self.slab.insert(m).and_then(|tok| {
+            match self.send_message(RegisterMachine(tok)) {
+                Ok(()) => Ok(tok),
+                Err(RegisterMachine(tok)) => {
+                    Err(self.slab.remove(tok).expect("This should not happen."))
+                }
             }
-            Err(Full(Notify::NewMachine(m))) => Err(m),
-            Err(Closed(_)) => {
-                // It should never happen because we usually send from the
-                // inside of a main loop
-                panic!("Sending to closed channel. Main loop is already shut \
-                    down");
-            }
-        }
+        })
     }
     fn add_timeout_ms(&mut self, delay: u64, t: M::Timeout)
         -> Result<Timeout, TimerError>
@@ -103,64 +101,79 @@ impl<'a, C, M> Scope<M> for RootScope<'a, Handler<C, M>>
         -> Result<(), Error>
         where E: Evented
     {
-        self.eloop.register_opt(io, self.token, interest, opt)
+        self.eloop.register(io, self.token, interest, opt)
+    }
+}
+
+impl<'a, C, M> RootScope<'a, Handler<C, M>, M>
+    where M: 'a, M: EventMachine<C>,
+          M::Timeout: 'a,
+{
+    fn send_message(&mut self, m: <Handler<C, M> as mio::Handler>::Message) ->
+        Result<(), <Handler<C, M> as mio::Handler>::Message>
+    {
+        use mio::NotifyError::*;
+        match self.channel.send(m) {
+            Ok(()) => Ok(()),
+            Err(Io(e)) => {
+                // We would probably do something better here, but mio doesn't
+                // give us a message. But anyway it's probably never happen
+                panic!("Io error when sending notify: {}", e);
+            }
+            Err(Full(m)) => Err(m),
+            Err(Closed(_)) => {
+                // It should never happen because we usually send from the
+                // inside of a main loop
+                panic!("Sending to closed channel. Main loop is already shut \
+                    down");
+            }
+        }
     }
 }
 
 impl<'a, M, Ctx> mio::Handler for Handler<Ctx, M>
     where M: EventMachine<Ctx>
 {
-    type Message = Notify<M>;
+    type Message = Notify;
     type Timeout = M::Timeout;
     fn ready<'x>(&mut self, eloop: &'x mut EventLoop<Self>,
         token: Token, events: EventSet)
     {
-        let ref mut ctx = self.context;
-        let ref mut scope = RootScope {
-            eloop: eloop,
-            channel: &self.channel,
-            token: token,
-        };
-        self.slab.replace_with(token, |fsm| {
+        let channel = &self.channel;
+        let ctx = &mut self.context;
+        self.slab.replace_with(token, |fsm, slab| {
+            let ref mut scope = RootScope {
+                eloop: eloop,
+                channel: channel,
+                slab: slab,
+                token: token,
+            };
             fsm.ready(events, ctx, scope)
-        }).ok();  // Spurious events are ok in mio
+        }).ok();  // Spurious events are ok in mio*/
     }
 
     fn notify(&mut self, eloop: &mut EventLoop<Self>, msg: Self::Message) {
         use self::Notify::*;
-        let ref mut ctx = self.context;
         match msg {
-            NewMachine(fsm) => {
-                // This is so complex because of limitations of Slab
-                match self.slab.insert(fsm) {
-                    Ok(tok) => {
-                        let ref mut scope = RootScope {
-                            eloop: eloop,
-                            channel: &self.channel,
-                            token: tok,
-                        };
-                        self.slab.replace_with(tok, |mut fsm| {
-                            match fsm.register(scope) {
-                                Ok(()) => Some(fsm),
-                                Err(_) => {
-                                    fsm.abort(Abort::RegisterFailed,
-                                        ctx, scope);
-                                    None
-                                }
-                            }
-                        }).unwrap();
+            RegisterMachine(tok) => {
+                let channel = &self.channel;
+                let ctx = &mut self.context;
+                self.slab.replace_with(tok, |mut fsm, slab| {
+                    let ref mut scope = RootScope {
+                        eloop: eloop,
+                        channel: channel,
+                        slab: slab,
+                        token: tok,
+                    };
+                    match fsm.register(scope) {
+                        Ok(()) => Some(fsm),
+                        Err(_) => {
+                            fsm.abort(Abort::RegisterFailed,
+                                ctx, scope);
+                            None
+                        }
                     }
-                    Err(fsm) => {
-                        // TODO(tailhook) it should be global scope instead
-                        // of FSM-bound scope
-                        let ref mut scope = RootScope {
-                            eloop: eloop,
-                            channel: &self.channel,
-                            token: Token(usize::MAX),
-                        };
-                        fsm.abort(Abort::NoSlabSpace, ctx, scope);
-                    }
-                }
+                }).ok(); // The machine may have already been removed
             }
         }
     }

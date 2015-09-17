@@ -35,7 +35,7 @@ macro_rules! rotor_compose_state_machines {
             for scope::$cursub<'a, S>
             where S: $crate::Scope<$name<$($subtype),*>> + 'a,
         {
-            fn async_add_machine(&mut self, m: $curtyp) -> Result<(), $curtyp> {
+            fn async_add_machine(&mut self, m: $curtyp) -> Result<::mio::Token, $curtyp> {
                 self.0.async_add_machine($name::$cursub(m))
                 .map_err(|x| if let $name::$cursub(c) = x {
                     c

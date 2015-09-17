@@ -2,7 +2,7 @@ use std::io::Error;
 use std::marker::PhantomData;
 
 use mio::TryAccept;
-use mio::{EventSet, Handler, PollOpt, Evented};
+use mio::{Token, EventSet, Handler, PollOpt, Evented};
 use mio::{Timeout, TimerError};
 
 use {BaseMachine, EventMachine, Scope};
@@ -36,7 +36,7 @@ impl<'a, M, S, A, C> Scope<M> for ScopeProxy<'a, S, A, C>
           A: TryAccept+Send, A: Evented,
           M: Init<A::Output, C>,
 {
-    fn async_add_machine(&mut self, m: M) -> Result<(), M> {
+    fn async_add_machine(&mut self, m: M) -> Result<Token, M> {
         self.0.async_add_machine(Serve::Connection(m))
         .map_err(|x| if let Serve::Connection(c) = x {
             c
