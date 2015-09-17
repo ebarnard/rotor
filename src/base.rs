@@ -1,3 +1,3 @@
-pub trait Machine {
+pub trait Machine: Send + Sized {
     type Timeout;
 }

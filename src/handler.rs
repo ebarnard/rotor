@@ -17,22 +17,23 @@ pub enum Notify {
     RegisterMachine(Token)
 }
 
-struct RootScope<'a, H: mio::Handler, M: Send>
-    where H::Timeout: 'a, H::Message: 'a, H:'a, M: 'a
+struct RootScope<'a, M, C>
+    where M: 'a + EventMachine<C>,
+          C: 'a
 {
-    channel: &'a Sender<H::Message>,
-    eloop: &'a mut EventLoop<H>,
+    channel: &'a Sender<Notify>,
+    eloop: &'a mut EventLoop<Handler<M, C>>,
     slab: &'a mut Slab<M>,
     token: Token,
 }
 
-pub struct Handler<Ctx, M: Send> {
+pub struct Handler<M, C> {
     slab: Slab<M>,
-    context: Ctx,
+    context: C,
     channel: Sender<Notify>,
 }
 
-pub trait EventMachine<C>: BaseMachine + Send + Sized {
+pub trait EventMachine<C>: BaseMachine {
     /// Socket readiness notification
     fn ready<S>(self, events: EventSet, context: &mut C, scope: &mut S)
         -> Option<Self>
@@ -58,11 +59,11 @@ pub trait EventMachine<C>: BaseMachine + Send + Sized {
     }
 }
 
-impl<C, M:Send> Handler<C, M>
+impl<M, C> Handler<M, C>
     where M: EventMachine<C>
 {
-    pub fn new(context: C, eloop: &mut EventLoop<Handler<C, M>>)
-        -> Handler<C, M>
+    pub fn new(context: C, eloop: &mut EventLoop<Handler<M, C>>)
+        -> Handler<M, C>
     {
         // TODO(tailhook) create default config from the ulimit data instead
         // of using real defaults
@@ -74,9 +75,8 @@ impl<C, M:Send> Handler<C, M>
     }
 }
 
-impl<'a, C, M> Scope<M> for RootScope<'a, Handler<C, M>, M>
-    where M: 'a, M: EventMachine<C>,
-          M::Timeout: 'a,
+impl<'a, M, C> Scope<M> for RootScope<'a, M, C>
+    where M: EventMachine<C>
 {
     fn async_add_machine(&mut self, m: M) -> Result<Token, M> {
         use self::Notify::*;
@@ -105,12 +105,11 @@ impl<'a, C, M> Scope<M> for RootScope<'a, Handler<C, M>, M>
     }
 }
 
-impl<'a, C, M> RootScope<'a, Handler<C, M>, M>
-    where M: 'a, M: EventMachine<C>,
-          M::Timeout: 'a,
+impl<'a, M, C> RootScope<'a, M, C>
+    where M: EventMachine<C>
 {
-    fn send_message(&mut self, m: <Handler<C, M> as mio::Handler>::Message) ->
-        Result<(), <Handler<C, M> as mio::Handler>::Message>
+    fn send_message(&mut self, m: Notify) ->
+        Result<(), Notify>
     {
         use mio::NotifyError::*;
         match self.channel.send(m) {
@@ -131,8 +130,8 @@ impl<'a, C, M> RootScope<'a, Handler<C, M>, M>
     }
 }
 
-impl<'a, M, Ctx> mio::Handler for Handler<Ctx, M>
-    where M: EventMachine<Ctx>
+impl<'a, M, C> mio::Handler for Handler<M, C>
+    where M: EventMachine<C>
 {
     type Message = Notify;
     type Timeout = M::Timeout;
