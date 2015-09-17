@@ -8,19 +8,18 @@ use mio::{Timeout, TimerError};
 use {BaseMachine, EventMachine, Scope};
 use handler::Abort::MachineAddError;
 
-pub enum Serve<S, M, Ctx>
-    where
-        M: Init<S::Output, Ctx>, M: EventMachine<Ctx>, M: Send,
-        S: TryAccept+Send, S: Evented,
+pub enum Serve<A, M, C>
+    where A: Evented + TryAccept + Send,
+          M: Init<A::Output, C>,
+
 {
-    Accept(S, PhantomData<*const Ctx>),
+    Accept(A, PhantomData<*const C>),
     Connection(M),
 }
 
-unsafe impl<S:TryAccept+Send, M, Ctx> Send for Serve<S, M, Ctx>
-    where
-        M: Init<S::Output, Ctx>, M: EventMachine<Ctx>, M: Send,
-        S: TryAccept+Send, S: Evented,
+unsafe impl<A, M, C> Send for Serve<A, M, C>
+    where M: Init<A::Output, C>,
+          A: Evented + TryAccept + Send
 {}
 
 pub trait Init<T, C>: EventMachine<C> {
@@ -33,8 +32,8 @@ struct ScopeProxy<'a, S: 'a, A, C>(&'a mut S, PhantomData<*const (A, C)>);
 
 impl<'a, M, S, A, C> Scope<M> for ScopeProxy<'a, S, A, C>
     where S: Scope<Serve<A, M, C>> + 'a,
-          A: TryAccept+Send, A: Evented,
-          M: Init<A::Output, C>,
+          A: Evented + TryAccept + Send,
+          M: Init<A::Output, C>
 {
     fn async_add_machine(&mut self, m: M) -> Result<Token, M> {
         self.0.async_add_machine(Serve::Connection(m))
@@ -59,24 +58,20 @@ impl<'a, M, S, A, C> Scope<M> for ScopeProxy<'a, S, A, C>
         self.0.register(io, interest, opt)
     }
 }
-impl<S, M, Ctx> BaseMachine for Serve<S, M, Ctx>
-    where M: Init<S::Output, Ctx>,
-          M: EventMachine<Ctx>,
-          S: Evented,
-          S: TryAccept + Send,
+impl<A, M, C> BaseMachine for Serve<A, M, C>
+    where A: Evented + TryAccept + Send,
+          M: Init<A::Output, C>
 {
     type Timeout = M::Timeout;
 }
 
-impl<S, M, Ctx> EventMachine<Ctx> for Serve<S, M, Ctx>
-    where M: Init<S::Output, Ctx>,
-          M: EventMachine<Ctx>,
-          S: Evented,
-          S: TryAccept + Send,
+impl<A, M, C> EventMachine<C> for Serve<A, M, C>
+    where A: Evented + TryAccept + Send,
+          M: Init<A::Output, C>
 {
-    fn ready<Sc>(self, evset: EventSet, context: &mut Ctx, scope: &mut Sc)
+    fn ready<S>(self, evset: EventSet, context: &mut C, scope: &mut S)
         -> Option<Self>
-        where Sc: Scope<Self>
+        where S: Scope<Self>
     {
         use self::Serve::*;
         match self {
@@ -85,7 +80,7 @@ impl<S, M, Ctx> EventMachine<Ctx> for Serve<S, M, Ctx>
                     Ok(Some(child)) => {
                         let conm: M = <M as Init<_, _>>::accept(child, context,
                             &mut ScopeProxy(scope, PhantomData));
-                        let conn: Serve<S, M, Ctx> = Connection(conm);
+                        let conn: Serve<A, M, C> = Connection(conm);
                         scope.async_add_machine(conn)
                         .map_err(|child|
                             child.abort(MachineAddError, context, scope))
@@ -103,6 +98,7 @@ impl<S, M, Ctx> EventMachine<Ctx> for Serve<S, M, Ctx>
                 .map(Connection),
         }
     }
+
     fn register<Sc>(&mut self, scope: &mut Sc)
         -> Result<(), Error>
         where Sc: Scope<Self>
@@ -117,13 +113,11 @@ impl<S, M, Ctx> EventMachine<Ctx> for Serve<S, M, Ctx>
     }
 }
 
-impl<S, T, M, Ctx> Serve<S, M, Ctx>
-    where M: Init<T, Ctx>,
-          M: EventMachine<Ctx>,
-          S: Evented,
-          S: TryAccept<Output=T>+Send,
+impl<A, T, M, C> Serve<A, M, C>
+    where M: Init<T, C>,
+          A: Evented + TryAccept<Output=T> + Send,
 {
-    pub fn new(sock: S) -> Self {
+    pub fn new(sock: A) -> Self {
         Serve::Accept(sock, PhantomData)
     }
 }

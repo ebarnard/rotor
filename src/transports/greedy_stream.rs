@@ -27,9 +27,8 @@ use {Scope, BaseMachine};
 
 impl<T> Socket for T where T: Read, T: Write, T: Evented {}
 
-
-struct Inner<S: Socket+Send> {
-    sock: S,
+struct Inner<T> {
+    sock: T,
     inbuf: Buf,
     outbuf: Buf,
     writable: bool,
@@ -41,16 +40,15 @@ pub struct Transport<'a> {
     outbuf: &'a mut Buf,
 }
 
-pub struct Stream<S: Socket+Send, P: Protocol<S, C>, C>(
-    Inner<S>, P, PhantomData<*const C>);
+pub struct Stream<T, P, C>(Inner<T>, P, PhantomData<*const C>);
 
-unsafe impl<S: Socket+Send, P: Protocol<S, C>+Send, C> Send for Stream<S, P, C> {}
+unsafe impl<T: Socket+Send, P: Protocol<T, C>+Send, C> Send for Stream<T, P, C> {}
 
 /// This trait you should implement to handle the protocol. Only data_received
 /// handler is required, everything else may be left as is.
-pub trait Protocol<S, C>: BaseMachine + Send + Sized {
+pub trait Protocol<T, C>: BaseMachine {
     /// Returns new state machine in a state for new accepted connection
-    fn accepted(conn: &mut S, ctx: &mut C) -> Self;
+    fn accepted(conn: &mut T, ctx: &mut C) -> Self;
     /// Some chunk of data has been received and placed into the buffer
     ///
     /// It's edge-triggered so be sure to read everything useful. But you
@@ -71,7 +69,8 @@ pub trait Protocol<S, C>: BaseMachine + Send + Sized {
 }
 
 impl<T, P, C> Init<T, C> for Stream<T, P, C>
-    where T: Socket+Send, P: Protocol<T, C>
+    where T: Socket + Send,
+          P: Protocol<T, C>
 {
     fn accept<S>(mut conn: T, context: &mut C, _scope: &mut S)
         -> Self
@@ -88,17 +87,20 @@ impl<T, P, C> Init<T, C> for Stream<T, P, C>
         }, protocol, PhantomData)
     }
 }
-impl<T, P, Ctx> BaseMachine for Stream<T, P, Ctx>
-    where T: Socket+Send, P: Protocol<T, Ctx>
+
+impl<T, P, C> BaseMachine for Stream<T, P, C>
+    where T: Socket + Send,
+          P: Protocol<T, C>
 {
     type Timeout = P::Timeout;
 }
 
-impl<T, P, Ctx> EventMachine<Ctx> for Stream<T, P, Ctx>
-    where T: Socket+Send, P: Protocol<T, Ctx>
+impl<T, P, C> EventMachine<C> for Stream<T, P, C>
+    where T: Socket + Send,
+          P: Protocol<T, C>
 {
-    fn ready<S>(self, evset: EventSet, context: &mut Ctx, _scope: &mut S)
-        -> Option<Stream<T, P, Ctx>>
+    fn ready<S>(self, evset: EventSet, context: &mut C, _scope: &mut S)
+        -> Option<Stream<T, P, C>>
         where S: Scope<Self>
     {
         let Stream(mut stream, mut fsm, _) = self;
