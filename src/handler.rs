@@ -50,6 +50,12 @@ pub trait EventMachine<C>: BaseMachine {
         // Ignore shutdown requests by default
     }
 
+    fn timeout<S>(&mut self, _timeout: Self::Timeout, _context: &mut C, _scope: &mut S)
+        where S: Scope<Self>
+    {
+        // Ignore timeouts by default
+    }
+
     /// Abnormal termination of event machine
     fn abort<S>(self, reason: Abort, _context: &mut C, _scope: &mut S)
         where S: Scope<Self>

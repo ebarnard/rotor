@@ -11,7 +11,6 @@ pub mod buffer_util;
 pub mod base;
 pub mod scope;
 pub mod compose;
-pub mod timeouts;
 
 pub use base::Machine as BaseMachine;
 pub use handler::{EventMachine, Handler};
