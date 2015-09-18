@@ -2,122 +2,65 @@ use std::io::Error;
 use std::marker::PhantomData;
 
 use mio::TryAccept;
-use mio::{Token, EventSet, Handler, PollOpt, Evented};
-use mio::{Timeout, TimerError};
 
-use {BaseMachine, EventMachine, Scope};
+use {EventMachine, Scope, Config, EventSet, PollOpt, Evented};
 use handler::Abort::MachineAddError;
 
-pub enum Serve<A, M, C>
-    where A: Evented + TryAccept + Send,
-          M: Init<A::Output, C>,
-
-{
-    Accept(A, PhantomData<*const C>),
-    Connection(M),
-}
+pub struct Serve<A, M, C>(A, PhantomData<(*const M, *const C)>);
 
 unsafe impl<A, M, C> Send for Serve<A, M, C>
     where M: Init<A::Output, C>,
-          A: Evented + TryAccept + Send
+          A: Evented + TryAccept + Send + 'static,
+          C: Config
 {}
 
-pub trait Init<T, C>: EventMachine<C> {
-    fn accept<S>(conn: T, context: &mut C, scope: &mut S)
-        -> Self
-        where S: Scope<Self>;
-}
-
-struct ScopeProxy<'a, S: 'a, A, C>(&'a mut S, PhantomData<*const (A, C)>);
-
-impl<'a, M, S, A, C> Scope<M> for ScopeProxy<'a, S, A, C>
-    where S: Scope<Serve<A, M, C>> + 'a,
-          A: Evented + TryAccept + Send,
-          M: Init<A::Output, C>
+pub trait Init<S, C>: EventMachine<C> + Sized
+    where C: Config
 {
-    fn async_add_machine(&mut self, m: M) -> Result<Token, M> {
-        self.0.async_add_machine(Serve::Connection(m))
-        .map_err(|x| if let Serve::Connection(c) = x {
-            c
-        } else {
-            unreachable!();
-        })
-    }
-    fn add_timeout_ms(&mut self, delay: u64, t: M::Timeout)
-        -> Result<Timeout, TimerError>
-    {
-        self.0.add_timeout_ms(delay, t)
-    }
-    fn clear_timeout(&mut self, timeout: Timeout) -> bool {
-        self.0.clear_timeout(timeout)
-    }
-    fn register<E: ?Sized>(&mut self, io: &E, interest: EventSet, opt: PollOpt)
-        -> Result<(), Error>
-        where E: Evented
-    {
-        self.0.register(io, interest, opt)
-    }
-}
-impl<A, M, C> BaseMachine for Serve<A, M, C>
-    where A: Evented + TryAccept + Send,
-          M: Init<A::Output, C>
-{
-    type Timeout = M::Timeout;
+    fn accept(conn: S, context: &mut C::Context, scope: &mut Scope<C>) -> Option<Self>;
 }
 
 impl<A, M, C> EventMachine<C> for Serve<A, M, C>
-    where A: Evented + TryAccept + Send,
-          M: Init<A::Output, C>
+    where A: Evented + TryAccept + Send + 'static,
+          M: Init<A::Output, C>,
+          C: Config
 {
-    fn ready<S>(self, evset: EventSet, context: &mut C, scope: &mut S)
-        -> Option<Self>
-        where S: Scope<Self>
+    fn ready(&mut self, evset: EventSet, context: &mut C::Context, scope: &mut Scope<C>)
+        -> Option<()>
     {
-        use self::Serve::*;
-        match self {
-            Accept(sock, _) => {
-                match sock.accept() {
-                    Ok(Some(child)) => {
-                        let conm: M = <M as Init<_, _>>::accept(child, context,
-                            &mut ScopeProxy(scope, PhantomData));
-                        let conn: Serve<A, M, C> = Connection(conm);
-                        scope.async_add_machine(conn)
-                        .map_err(|child|
-                            child.abort(MachineAddError, context, scope))
-                        .ok();
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        error!("Error on socket accept: {}", e);
-                    }
-                }
-                Some(Accept(sock, PhantomData))
-            }
-            Connection(c) => c.ready(evset, context,
-                &mut ScopeProxy(scope, PhantomData))
-                .map(Connection),
+        if !evset.is_readable() {
+            return Some(())
         }
+
+        match self.0.accept() {
+            Ok(Some(child)) => {
+                <M as Init<_, _>>::accept(child, context, scope)
+                    .ok_or(())
+                    .and_then(|conm|
+                        scope.add_machine(Box::new(conm))
+                        .map_err(|mut child| child.abort(MachineAddError, context, scope)))
+                    .ok();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error!("Error on socket accept: {}", e);
+            }
+        }
+
+        Some(())
     }
 
-    fn register<Sc>(&mut self, scope: &mut Sc)
-        -> Result<(), Error>
-        where Sc: Scope<Self>
-    {
-        use self::Serve::*;
-        match self {
-            &mut Accept(ref mut s, _)
-            => scope.register(s, EventSet::readable(), PollOpt::level()),
-            &mut Connection(ref mut c)
-            => c.register(&mut ScopeProxy(scope, PhantomData)),
-        }
+    fn register(&mut self, scope: &mut Scope<C>) -> Result<(), Error> {
+        scope.register(&self.0, EventSet::readable(), PollOpt::level())
     }
 }
 
-impl<A, T, M, C> Serve<A, M, C>
-    where M: Init<T, C>,
-          A: Evented + TryAccept<Output=T> + Send,
+impl<A, S, M, C> Serve<A, M, C>
+    where M: Init<S, C>,
+          A: Evented + TryAccept<Output=S> + Send + 'static,
+          C: Config
 {
     pub fn new(sock: A) -> Self {
-        Serve::Accept(sock, PhantomData)
+        Serve(sock, PhantomData)
     }
 }
