@@ -226,6 +226,12 @@ impl<C> mio::Handler for Handler<C>
             _ => unimplemented!()
         }
     }
+
+    fn timeout(&mut self, eloop: &mut EventLoop<Self>, timeout: Self::Timeout) {
+        self.with_machine(eloop, timeout.token, move |machine, ctx, scope|
+            machine.timeout(timeout.timeout, ctx, scope)
+        ).ok();
+    }
 }
 
 impl<C> Handler<C>
