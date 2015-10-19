@@ -4,12 +4,13 @@ extern crate netbuf;
 extern crate mio;
 #[macro_use] extern crate log;
 extern crate memchr;
+extern crate slab;
 
 pub mod transports;
 pub mod handler;
 pub mod buffer_util;
 
-pub use handler::{EventMachine, Handler, Scope, Config, EventSet, PollOpt, Evented};
+pub use handler::{EventMachine, Handler, Scope, Config, EventSet, PollOpt, Evented, Token};
 
 
 struct PhantomSend<C>(::std::marker::PhantomData<*const C>);

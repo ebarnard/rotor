@@ -1,8 +1,8 @@
 use mio::{self, EventLoop, Sender};
-use mio::util::Slab;
 use std::io::Error;
 use std::time::Duration;
 use std::marker::PhantomData;
+use slab::Slab;
 
 pub use mio::{Evented, EventSet, PollOpt};
 
@@ -40,7 +40,7 @@ pub struct Scope<'a, C>
 {
     channel: &'a Sender<Message<C>>,
     eloop: &'a mut EventLoop<Handler<C>>,
-    slab: &'a mut Slab<EventMachineSlot<C>>,
+    slab: &'a mut Slab<EventMachineSlot<C>, Token>,
     counter_next: &'a mut u64,
     token: Token,
 }
@@ -48,26 +48,30 @@ pub struct Scope<'a, C>
 impl<'a, C> Scope<'a, C>
     where C: Config 
 {
-    pub fn add_machine(&mut self, machine: Box<EventMachine<C>>) -> Result<Token, Box<EventMachine<C>>> {
-        use self::MessageInner::*;
+    pub fn add_machine<T>(&mut self, machine: T) -> Result<Token, T>
+        where T: EventMachine<C>
+    {
+        let mut machine = Some(machine);
+        let counter = *self.counter_next;
+        let counter_next = &mut self.counter_next;
+        let channel = &self.channel;
 
-        let slot = EventMachineSlot {
-            machine: machine,
-            counter: *self.counter_next
-        };
-        *self.counter_next += 1;
+        self.slab.insert_with(|mio_token| {
+            let token = mio_token.set_counter(counter);
 
-        self.slab.insert(slot).and_then(|mio_token| {
-            let token = Token::from_mio(mio_token);
-
-            match self.send_message(RegisterMachine(token)) {
-                Ok(()) => Ok(token),
-                Err(RegisterMachine(_)) => {
-                    Err(self.slab.remove(mio_token).expect("This should not happen."))
-                },
+            match send_message(channel, MessageInner::RegisterMachine(token)) {
+                Ok(()) => {
+                    let slot = EventMachineSlot {
+                        machine: Box::new(machine.take().unwrap()),
+                        counter: counter
+                    };
+                    (**counter_next) += 1;
+                    Some(slot)
+                }
+                Err(MessageInner::RegisterMachine(_)) => None,
                 _ => unreachable!()
             }
-        }).map_err(|slot| slot.machine)
+        }).map(|mio_token| mio_token.set_counter(counter)).ok_or(machine.unwrap())
     }
 
     pub fn add_timeout(&mut self, delay: Duration, t: Timeout<C>)
@@ -88,25 +92,6 @@ impl<'a, C> Scope<'a, C>
     {
         self.eloop.register(io, self.token.mio_token, interest, opt)
     }
-
-    fn send_message(&mut self, m: MessageInner<C>) -> Result<(), MessageInner<C>> {
-        use mio::NotifyError::*;
-        match self.channel.send(Message(m)) {
-            Ok(()) => Ok(()),
-            Err(Io(e)) => {
-                // We would probably do something better here, but mio doesn't
-                // give us a message. But anyway it's probably never happen
-                panic!("Io error when sending notify: {}", e);
-            }
-            Err(Full(m)) => Err(m.0),
-            Err(Closed(_)) => {
-                // It should never happen because we usually send from the
-                // inside of a main loop
-                panic!("Sending to closed channel. Main loop is already shut \
-                    down");
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,12 +100,34 @@ pub struct Token {
     counter: Option<u64>
 }
 
+impl ::slab::Index for Token {
+    fn from_usize(i: usize) -> Token {
+        Token::from_mio(mio::Token(i))
+    }
+
+    fn as_usize(&self) -> usize {
+        self.mio_token.as_usize()
+    }
+}
+
 impl Token {
+    fn new(mio_token: mio::Token, counter: u64) -> Token {
+        Token {
+            mio_token: mio_token,
+            counter: Some(counter)
+        }
+    }
+
     fn from_mio(mio_token: mio::Token) -> Token {
         Token {
             mio_token: mio_token,
             counter: None
         }
+    }
+
+    fn set_counter(mut self, counter: u64) -> Token {
+        self.counter = Some(counter);
+        self
     }
 
     fn counter_eq(&self, other_counter: u64) -> bool {
@@ -141,7 +148,7 @@ pub struct EventMachineSlot<C>
 pub struct Handler<C>
     where C: Config
 {
-    slab: Slab<EventMachineSlot<C>>,
+    slab: Slab<EventMachineSlot<C>, Token>,
     context: C::Context,
     channel: Sender<Message<C>>,
     counter_next: u64
@@ -243,7 +250,7 @@ impl<C> Handler<C>
         let channel = &self.channel;
         let ctx = &mut self.context;
         let counter_next = &mut self.counter_next;
-        self.slab.replace_with(token.mio_token, |mut slot, slab| {
+        self.slab.replace_with(token, |mut slot, slab| {
             if token.counter_eq(slot.counter) {
                 let ref mut scope = Scope {
                     eloop: eloop,
@@ -258,5 +265,24 @@ impl<C> Handler<C>
                 Some(slot)
             }
         })
+    }
+}
+
+fn send_message<C: Config>(channel: &Sender<Message<C>>, m: MessageInner<C>) -> Result<(), MessageInner<C>> {
+    use mio::NotifyError::*;
+    match channel.send(Message(m)) {
+        Ok(()) => Ok(()),
+        Err(Io(e)) => {
+            // We would probably do something better here, but mio doesn't
+            // give us a message. But anyway it's probably never happen
+            panic!("Io error when sending notify: {}", e);
+        }
+        Err(Full(m)) => Err(m.0),
+        Err(Closed(_)) => {
+            // It should never happen because we usually send from the
+            // inside of a main loop
+            panic!("Sending to closed channel. Main loop is already shut \
+                down");
+        }
     }
 }

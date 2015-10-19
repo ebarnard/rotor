@@ -37,7 +37,7 @@ impl<A, M, C> EventMachine<C> for Serve<A, M, C>
                 <M as Init<_, _>>::accept(child, context, scope)
                     .ok_or(())
                     .and_then(|conm|
-                        scope.add_machine(Box::new(conm))
+                        scope.add_machine(conm)
                         .map_err(|mut child| child.abort(MachineAddError, context, scope)))
                     .ok();
             }
