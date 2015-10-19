@@ -25,7 +25,7 @@ use {EventMachine, Scope, Config, EventSet, PollOpt, Evented};
 
 impl<T> Socket for T where T: Read, T: Write, T: Evented {}
 
-struct Stream<T, P, C> {
+pub struct Stream<T, P, C> {
     sock: T,
     inbuf: Buf,
     outbuf: Buf,
@@ -35,12 +35,22 @@ struct Stream<T, P, C> {
     phantom: PhantomData<*const C>
 }
 
-unsafe impl<T: Socket+Send, P: Protocol<T, C>, C: Config> Send for Stream<T, P, C> {}
-
 pub struct Transport<'a> {
-    pub input: &'a mut Buf,
-    pub output: &'a mut Buf,
+    input: &'a mut Buf,
+    output: &'a mut Buf,
 }
+
+impl<'a> Transport<'a> {
+    pub fn input(&mut self) -> &mut Buf {
+        &mut self.input
+    }
+
+    pub fn output(&mut self) -> &mut Buf {
+        &mut self.output
+    }
+}
+
+unsafe impl<T: Socket+Send, P: Protocol<T, C>, C: Config> Send for Stream<T, P, C> {}
 
 /// This trait you should implement to handle the protocol. Only data_received
 /// handler is required, everything else may be left as is.
