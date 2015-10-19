@@ -76,9 +76,33 @@ impl<P, C> EventMachine<C> for Socket<P, C>
         -> Option<()>
     {
         if let Some(mut protocol) = self.protocol.take() {
-            if evset.is_readable() {
-                //readable = true;
-                loop {
+            let mut readable = evset.is_readable();
+            let mut writable = evset.is_writable();
+            loop {
+                if writable && self.send_queue.len() > 0 {
+                    if let Some(&(ref target, ref buf)) = self.send_queue.front() {
+                        match self.sock.send_to(&buf[..], target) {
+                            Ok(Some(len)) => {
+                                assert!(len == buf.len());
+                            },
+                            Ok(None) => {
+                                writable = false;
+                                continue;
+                            },
+                            Err(ref e) if e.kind() == Interrupted => {
+                                continue;
+                            },
+                            Err(e) => {
+                                protocol.error_happened(e, ctx);
+                                return None
+                            }
+                        }
+                    }
+                    // If control flow gets here socket it writable
+                    self.send_queue.pop_front();
+                    continue;
+                }
+                if readable {
                 	match self.sock.recv_from(&mut self.recv_buf[..]) {
                 		Ok(Some((len, source))) => {
                 			let pkt = Packet {
@@ -94,7 +118,7 @@ impl<P, C> EventMachine<C> for Socket<P, C>
                 			};
                 		},
                 		Ok(None) => {
-                			//readable = false;
+                			readable = false;
                 			break;
                 		},
                 		Err(ref e) if e.kind() == Interrupted => { continue; },
@@ -104,28 +128,7 @@ impl<P, C> EventMachine<C> for Socket<P, C>
                 		}
                 	}
                 }
-            }
-            if evset.is_writable() && self.send_queue.len() > 0 {
-                //writable = true;
-                while let Some((target, buf)) = self.send_queue.pop_front() {
-                	match self.sock.send_to(&buf[..], &target) {
-                		Ok(Some(len)) => { /* TODO: Deal with not all written situation */ },
-                		Ok(None) => {
-                			//writable = false;
-                			self.send_queue.push_front((target, buf));
-                			break;
-                		},
-                		Err(ref e) if e.kind() == Interrupted => {
-                			self.send_queue.push_front((target, buf));
-                			continue;
-                		},
-                		Err(e) => {
-                			self.send_queue.push_front((target, buf));
-                			protocol.error_happened(e, ctx);
-                			return None
-                		}
-                	}
-                }
+                if !readable && !writable { break; }
             }
             self.protocol = Some(protocol);
             Some(())
