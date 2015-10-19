@@ -74,16 +74,22 @@ impl<'a, C> Scope<'a, C>
         }).map(|mio_token| mio_token.set_counter(counter)).ok_or(machine.unwrap())
     }
 
-    pub fn add_timeout(&mut self, delay: Duration, t: Timeout<C>)
+    pub fn set_timeout(&mut self, delay: Duration, timeout: C::Timeout)
         -> Result<mio::Timeout, mio::TimerError>
     {
-        unimplemented!();
-        // TODO: Use std duration
-        //self.eloop.timeout_ms(t, delay)
+        let timeout = Timeout {
+            timeout: timeout,
+            token: self.token
+        };
+        let delay_millis = delay.as_secs() * 1_000 + delay.subsec_nanos() as u64 / 1_000_000;
+        self.eloop.timeout_ms(timeout, delay_millis)
     }
 
-    pub fn clear_timeout(&mut self, timeout: mio::Timeout) -> bool {
-        self.eloop.clear_timeout(timeout)
+    pub fn clear_timeout(&mut self, timeout: mio::Timeout) -> Result<(), ()> {
+        match self.eloop.clear_timeout(timeout) {
+            true => Ok(()),
+            false => Err(())
+        }
     }
 
     pub fn register<E: ?Sized>(&mut self, io: &E, interest: EventSet, opt: PollOpt)
